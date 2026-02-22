@@ -14,11 +14,24 @@ mkdir -p "$OUTPUT_DIR"
 
 CHAPTER_FILE="$OUTPUT_DIR/chapters.txt"
 
-# Extract START and END from ffprobe, convert to seconds with 3 decimals
-ffprobe -v error -show_entries chapter=start_time,end_time \
-    -of csv=p=0 "$INPUT_PATH" | awk -F, '{printf "%.3f,%.3f\n", $1, $2}' > "$CHAPTER_FILE"
+# Extract artist from source file
+ARTIST=$(ffprobe -v error -show_entries format_tags=artist \
+    -of default=noprint_wrappers=1:nokey=1 "$INPUT_PATH")
 
-echo "Simple chapters file written to: $CHAPTER_FILE"
+# Extract START, END, and TITLE from ffprobe
+ffprobe -v error -show_entries "chapter=start_time,end_time:chapter_tags=title" \
+    -of csv=p=0 "$INPUT_PATH" | awk -F, '{
+        start = $1
+        end = $2
+        # Rejoin remaining fields as title (in case title contains commas)
+        title = ""
+        for (i = 3; i <= NF; i++) {
+            title = title (i > 3 ? "," : "") $i
+        }
+        printf "%s,%s,%s\n", start, end, title
+    }' > "$CHAPTER_FILE"
+
+echo "Chapter file written to: $CHAPTER_FILE"
 
 if [[ ! -f "$CHAPTER_FILE" ]]; then
     echo "Chapter file not found: $CHAPTER_FILE"
@@ -27,31 +40,39 @@ fi
 
 COUNT=1
 
-# Use while read safely
-# Use a while + IFS read directly on file descriptor 3
 exec 3< "$CHAPTER_FILE"
-while IFS=',' read -r START END <&3; do
-    # Skip empty lines
+while IFS=',' read -r START END TITLE <&3; do
     [[ -z "$START" || -z "$END" ]] && continue
 
-    # Remove any stray whitespace or carriage returns
     START="${START//$'\r'/}"
     END="${END//$'\r'/}"
+    TITLE="${TITLE//$'\r'/}"
 
-    OUTFILE="$OUTPUT_DIR/chapter_$(printf "%03d" $COUNT).mp3"
-    echo "Creating Chapter $COUNT (Start: $START, End: $END)..."
+    # Fall back to "Chapter N" if title is empty
+    [[ -z "$TITLE" ]] && TITLE="Chapter $COUNT"
+
+    # Sanitize title for use in filename
+    SAFE_TITLE="${TITLE//[\/:\\*?\"<>|]/}"
+
+    OUTFILE="$OUTPUT_DIR/$(printf "%03d" $COUNT) - ${SAFE_TITLE}.mp3"
+    echo "Creating: $TITLE (Start: $START, End: $END)..."
 
     ffmpeg -v error \
         -i "$INPUT_PATH" \
         -ss "$START" \
         -to "$END" \
         -c:a libmp3lame \
-        -q:a 2 \
+        -q:a 6 \
         -vn \
+        -metadata album="$BASENAME" \
+        -metadata title="$TITLE" \
+        -metadata track="$COUNT" \
+        -metadata artist="$ARTIST" \
+        -metadata album_artist="$ARTIST" \
         "$OUTFILE"
 
     ((COUNT++))
 done
 
 exec 3<&-
-echo "Done. Files saved to: $OUTPUT_DIR"
+echo "Done. $((COUNT-1)) chapters saved to: $OUTPUT_DIR"
